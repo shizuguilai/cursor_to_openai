@@ -1,0 +1,45 @@
+import type { AgentCheckpointStore, AgentRunStore, CursorAgentPlatformOptions, RunEventNotifier, RunEventStore } from "@anysphere/cursor-sdk-local-runtime/run-store";
+import type { AgentMessage, AgentOperationOptions, CursorRequestOptions, GetAgentMessagesOptions, GetAgentOptions, GetRunOptions, ListAgentsOptions, ListRunsOptions, ListResult as PublicListResult, SDKAgent, SDKAgentInfo, SDKModel, SDKRepository, SDKUser } from "./agent.js";
+import { type SDKMessage } from "./messages.js";
+import type { AgentOptions, ModelSelection } from "./options.js";
+import { type Run } from "./run.js";
+export declare class CursorAgentPlatform {
+    readonly store: AgentRunStore;
+    readonly checkpointStore: AgentCheckpointStore;
+    readonly eventStore: RunEventStore | undefined;
+    readonly eventNotifier: RunEventNotifier | undefined;
+    private readonly workspaceRef;
+    private readonly localModelListCache;
+    constructor(store: AgentRunStore, checkpointStore: AgentCheckpointStore, eventStore: RunEventStore | undefined, eventNotifier: RunEventNotifier | undefined, workspaceRef: string);
+    resolveLocalModelSelection(selection: ModelSelection, apiKey: string | undefined): Promise<ModelSelection>;
+    private listModelsForLocalValidation;
+    createAgent(options: AgentOptions): Promise<SDKAgent>;
+    resumeAgent(agentId: string, options: Partial<AgentOptions>): Promise<SDKAgent>;
+    listAgents(options?: ListAgentsOptions): Promise<PublicListResult<SDKAgentInfo>>;
+    getAgent(agentId: string): Promise<SDKAgentInfo>;
+    archiveAgent(agentId: string): Promise<void>;
+    unarchiveAgent(agentId: string): Promise<void>;
+    deleteAgent(agentId: string): Promise<void>;
+    listRuns(agentId: string, options?: ListRunsOptions): Promise<PublicListResult<Run>>;
+    getRun(runId: string): Promise<Run>;
+    getAgentMessages(agentId: string, options?: GetAgentMessagesOptions): Promise<AgentMessage[]>;
+    appendRunMessage(message: SDKMessage): Promise<void>;
+    private toDetachedStoreRun;
+    private createRunEventTailer;
+    private findRunById;
+}
+export declare function createAgentPlatform(options?: CursorAgentPlatformOptions): Promise<CursorAgentPlatform>;
+export declare function createDefaultAgent(options: AgentOptions): Promise<SDKAgent>;
+export declare function resumeDefaultAgent(agentId: string, options?: Partial<AgentOptions>): Promise<SDKAgent>;
+export declare function listDefaultAgents(options?: ListAgentsOptions): Promise<PublicListResult<SDKAgentInfo>>;
+export declare function listDefaultRuns(agentId: string, options?: ListRunsOptions): Promise<PublicListResult<Run>>;
+export declare function getDefaultRun(runId: string, options?: GetRunOptions): Promise<Run>;
+export declare function getDefaultAgentMessages(agentId: string, options?: GetAgentMessagesOptions): Promise<AgentMessage[]>;
+export declare function getDefaultAgent(agentId: string, options?: GetAgentOptions): Promise<SDKAgentInfo>;
+export declare function archiveDefaultAgent(agentId: string, options?: AgentOperationOptions): Promise<void>;
+export declare function unarchiveDefaultAgent(agentId: string, options?: AgentOperationOptions): Promise<void>;
+export declare function deleteDefaultAgent(agentId: string, options?: AgentOperationOptions): Promise<void>;
+export declare function getDefaultMe(options?: CursorRequestOptions): Promise<SDKUser>;
+export declare function listDefaultModels(options?: CursorRequestOptions): Promise<SDKModel[]>;
+export declare function listDefaultRepositories(options?: CursorRequestOptions): Promise<SDKRepository[]>;
+//# sourceMappingURL=platform.d.ts.map
