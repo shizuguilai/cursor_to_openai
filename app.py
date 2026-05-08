@@ -11,12 +11,18 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cursor_client import CursorCliClient, merge_assistant_text, messages_to_prompt
+from cursor_client import (
+    ChatSessionPool,
+    CursorCliClient,
+    merge_assistant_text,
+    messages_to_prompt,
+)
 from models import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -33,7 +39,60 @@ from models import (
 logger = logging.getLogger("cursor_to_openai")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
-app = FastAPI(title="Cursor CLI OpenAI Adapter", version="0.2.0")
+
+def _env_bool(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+_client = CursorCliClient()
+
+POOL_ENABLED = _env_bool("AGENT_POOL_ENABLED", True)
+POOL_SIZE = max(1, int(os.environ.get("AGENT_POOL_SIZE", "1")))
+POOL_MAX_USES = max(1, int(os.environ.get("AGENT_POOL_MAX_USES", "20")))
+POOL_ACQUIRE_TIMEOUT = float(os.environ.get("AGENT_POOL_ACQUIRE_TIMEOUT", "5"))
+
+MODELS_CACHE_TTL = max(0, int(os.environ.get("MODELS_CACHE_TTL", "300")))
+
+_pool: ChatSessionPool | None = (
+    ChatSessionPool(_client, size=POOL_SIZE, max_uses=POOL_MAX_USES)
+    if POOL_ENABLED
+    else None
+)
+
+_models_cache: tuple[float, list[dict]] | None = None
+_models_cache_lock = threading.Lock()
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    if _pool is not None:
+        logger.info(
+            "ChatSessionPool 启用：size=%d, max_uses=%d，正在后台预热…",
+            POOL_SIZE,
+            POOL_MAX_USES,
+        )
+        asyncio.create_task(asyncio.to_thread(_pool.warmup))
+    if MODELS_CACHE_TTL > 0:
+        asyncio.create_task(asyncio.to_thread(_warm_models_cache))
+    yield
+
+
+def _warm_models_cache() -> None:
+    global _models_cache
+    try:
+        raw = _client.list_models()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("预热 models 缓存失败: %s", e)
+        return
+    with _models_cache_lock:
+        _models_cache = (time.time(), raw)
+    logger.info("models 缓存已预热，共 %d 个模型", len(raw))
+
+
+app = FastAPI(title="Cursor CLI OpenAI Adapter", version="0.3.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,8 +100,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-_client = CursorCliClient()
 
 
 def _usage_from_result(result: dict | None) -> Usage | None:
@@ -89,16 +146,32 @@ def _error_chunk(completion_id: str, created: int, model: str, message: str) -> 
     return f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
 
 
+def _acquire_chat_id() -> str | None:
+    if _pool is None:
+        return None
+    return _pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT)
+
+
+def _release_chat_id(chat_id: str | None) -> None:
+    if _pool is None or chat_id is None:
+        return
+    _pool.release(chat_id)
+
+
 async def _stream_chat(prompt: str, model: str) -> AsyncIterator[str]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     q: "queue.Queue[tuple[str, object] | None]" = queue.Queue()
 
+    chat_id = await asyncio.to_thread(_acquire_chat_id)
+
     def worker() -> None:
         accumulated = ""
         last_result: dict | None = None
         try:
-            for event in _client.iter_stream_json_events(prompt, model):
+            for event in _client.iter_stream_json_events(
+                prompt, model, resume_chat_id=chat_id
+            ):
                 et = event.get("type")
                 if et == "thinking":
                     continue
@@ -111,7 +184,7 @@ async def _stream_chat(prompt: str, model: str) -> AsyncIterator[str]:
                 accumulated, delta = merge_assistant_text(accumulated, text)
                 if delta:
                     q.put(("delta", delta))
-        except BaseException as e:  # noqa: BLE001 - 转给主流程统一上报
+        except BaseException as e:  # noqa: BLE001
             logger.exception("agent worker 异常")
             q.put(("error", str(e) or e.__class__.__name__))
         finally:
@@ -129,27 +202,30 @@ async def _stream_chat(prompt: str, model: str) -> AsyncIterator[str]:
 
     finish_reason: str = "stop"
     error_message: str | None = None
-    while True:
-        item = await asyncio.to_thread(q.get)
-        if item is None:
-            break
-        kind, payload = item
-        if kind == "delta":
-            yield _chunk_payload(
-                completion_id,
-                created,
-                model,
-                ChatCompletionDelta(content=str(payload)),
-            )
-        elif kind == "error":
-            error_message = str(payload)
-            finish_reason = "error"
-        elif kind == "done":
-            res = payload if isinstance(payload, dict) else None
-            if res and res.get("is_error"):
+    try:
+        while True:
+            item = await asyncio.to_thread(q.get)
+            if item is None:
+                break
+            kind, payload = item
+            if kind == "delta":
+                yield _chunk_payload(
+                    completion_id,
+                    created,
+                    model,
+                    ChatCompletionDelta(content=str(payload)),
+                )
+            elif kind == "error":
+                error_message = str(payload)
                 finish_reason = "error"
-                if not error_message:
-                    error_message = str(res.get("result") or "agent reported error")
+            elif kind == "done":
+                res = payload if isinstance(payload, dict) else None
+                if res and res.get("is_error"):
+                    finish_reason = "error"
+                    if not error_message:
+                        error_message = str(res.get("result") or "agent reported error")
+    finally:
+        await asyncio.to_thread(_release_chat_id, chat_id)
 
     if error_message:
         yield _error_chunk(completion_id, created, model, error_message)
@@ -171,7 +247,8 @@ async def root() -> JSONResponse:
         {
             "service": "cursor-to-openai",
             "status": "ok",
-            "endpoints": ["/v1/models", "/v1/chat/completions"],
+            "endpoints": ["/v1/models", "/v1/chat/completions", "/v1/pool"],
+            "chat_session_pool": _pool is not None,
         }
     )
 
@@ -181,12 +258,30 @@ async def healthz() -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+@app.get("/v1/pool")
+async def pool_status() -> JSONResponse:
+    if _pool is None:
+        return JSONResponse({"enabled": False})
+    stats = _pool.stats()
+    return JSONResponse({"enabled": True, **stats})
+
+
 @app.get("/v1/models")
 async def list_models() -> JSONResponse:
+    global _models_cache
+    if MODELS_CACHE_TTL > 0:
+        with _models_cache_lock:
+            cached = _models_cache
+        if cached and time.time() - cached[0] < MODELS_CACHE_TTL:
+            data = [ModelObject(**m) for m in cached[1]]
+            return JSONResponse(ModelListResponse(data=data).model_dump())
     try:
         raw_list = await asyncio.to_thread(_client.list_models)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"列出模型失败: {e}") from e
+    if MODELS_CACHE_TTL > 0:
+        with _models_cache_lock:
+            _models_cache = (time.time(), raw_list)
     data = [ModelObject(**m) for m in raw_list]
     return JSONResponse(ModelListResponse(data=data).model_dump())
 
@@ -210,12 +305,15 @@ async def chat_completions(body: ChatCompletionRequest):
             },
         )
 
+    chat_id = await asyncio.to_thread(_acquire_chat_id)
     try:
         text, result = await asyncio.to_thread(
-            _client.collect_completion_text, prompt, model
+            _client.collect_completion_text, prompt, model, chat_id
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"agent 执行失败: {e}") from e
+    finally:
+        await asyncio.to_thread(_release_chat_id, chat_id)
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
