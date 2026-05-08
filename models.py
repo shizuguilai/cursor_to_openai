@@ -4,20 +4,30 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"]
-    content: str | list[dict[str, Any]]
+    model_config = ConfigDict(extra="ignore")
+
+    role: Literal["system", "user", "assistant", "tool", "developer", "function"]
+    content: str | list[dict[str, Any]] | None = None
+    name: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     model: str = Field(default="auto")
     messages: list[ChatMessage]
     stream: bool = False
     temperature: float | None = None
+    top_p: float | None = None
     max_tokens: int | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    stop: str | list[str] | None = None
+    user: str | None = None
 
 
 class ModelObject(BaseModel):
@@ -34,13 +44,16 @@ class ModelListResponse(BaseModel):
 
 class ChatCompletionMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
-    content: str | None
+    content: str | None = None
+
+
+FinishReason = Literal["stop", "length", "tool_calls", "content_filter", "error"]
 
 
 class ChatCompletionChoice(BaseModel):
     index: int = 0
     message: ChatCompletionMessage
-    finish_reason: Literal["stop", "length", "error"] | None = "stop"
+    finish_reason: FinishReason | None = "stop"
 
 
 class Usage(BaseModel):
@@ -66,7 +79,7 @@ class ChatCompletionDelta(BaseModel):
 class ChatCompletionChunkChoice(BaseModel):
     index: int = 0
     delta: ChatCompletionDelta
-    finish_reason: Literal["stop", "length", "error"] | None = None
+    finish_reason: FinishReason | None = None
 
 
 class ChatCompletionChunk(BaseModel):
