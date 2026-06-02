@@ -65,6 +65,47 @@ _pool: ChatSessionPool | None = (
 _models_cache: tuple[float, list[dict]] | None = None
 _models_cache_lock = threading.Lock()
 
+# 模型校验缓存：请求的模型不在 agent 实际可用列表时回退到 auto，
+# 这样上游（如 openclaw）配置了已被 Cursor 重命名/下线的模型也不会整体失败。
+_VALID_MODELS_TTL = 300
+_valid_models_cache: tuple[float, set[str]] | None = None
+_valid_models_lock = threading.Lock()
+
+
+def _available_model_ids() -> set[str]:
+    global _valid_models_cache
+    now = time.time()
+    with _valid_models_lock:
+        cached = _valid_models_cache
+    if cached and now - cached[0] < _VALID_MODELS_TTL:
+        return cached[1]
+    try:
+        raw = _client.list_models()
+        ids = {m["id"] for m in raw if m.get("id")}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("获取可用模型失败，跳过模型校验: %s", e)
+        return cached[1] if cached else set()
+    with _valid_models_lock:
+        _valid_models_cache = (now, ids)
+    return ids
+
+
+def _resolve_model(requested: str | None) -> str:
+    """把请求模型解析为一个 agent 当前确实支持的模型；无效则回退到 auto。"""
+    model = (requested or "auto").strip() or "auto"
+    ids = _available_model_ids()
+    if not ids:
+        # 列不出可用模型（agent 异常等），不拦截，交给下游报真实错误
+        return model
+    if model in ids:
+        return model
+    logger.info(
+        "请求模型 %r 不在可用列表，回退到 auto（当前可用: %s）",
+        model,
+        ", ".join(sorted(ids)),
+    )
+    return "auto"
+
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -292,7 +333,7 @@ async def chat_completions(body: ChatCompletionRequest):
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
     prompt = messages_to_prompt(body.messages)
-    model = body.model or "auto"
+    model = await asyncio.to_thread(_resolve_model, body.model)
 
     if body.stream:
         return StreamingResponse(

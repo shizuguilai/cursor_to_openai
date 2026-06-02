@@ -68,21 +68,21 @@ curl -s http://127.0.0.1:8080/v1/models | python3 -m json.tool
 ```bash
 curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"composer-2-fast","messages":[{"role":"user","content":"用一句话介绍你自己"}],"stream":false}' \
+  -d '{"model":"composer-2.5-fast","messages":[{"role":"user","content":"用一句话介绍你自己"}],"stream":false}' \
   | python3 -m json.tool
 ```
 
 ```bash
 curl -N -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"composer-2-fast","messages":[{"role":"user","content":"数到3，每数一个数字换行"}],"stream":true}'
+  -d '{"model":"composer-2.5-fast","messages":[{"role":"user","content":"数到3，每数一个数字换行"}],"stream":true}'
 ```
 
 ## 客户端接入配置
 
 适用于以 `provider / base_url / api / api_key / model` 风格描述上游的客户端（如部分聚合面板、桌面 LLM 客户端等）。本网关 **未做鉴权**，`api_key` 字段必须给一个非空字符串以通过客户端自身的格式校验，写什么都行。
 
-推荐的最小配置（以 `composer-2-fast` 为例）：
+推荐的最小配置（以 `composer-2.5-fast` 为例）：
 
 ```json
 {
@@ -91,8 +91,8 @@ curl -N -s http://127.0.0.1:8080/v1/chat/completions \
   "api": "openai-completions",
   "api_key": "sk-local-no-auth",
   "model": {
-    "id": "composer-2-fast",
-    "name": "Cursor: Composer 2 Fast"
+    "id": "composer-2.5-fast",
+    "name": "Cursor: Composer 2.5 Fast"
   }
 }
 ```
@@ -102,10 +102,13 @@ curl -N -s http://127.0.0.1:8080/v1/chat/completions \
 | `model.id` | 推荐 `model.name` |
 |------------|-------------------|
 | `auto` | Cursor: Auto |
-| `composer-2-fast` | Cursor: Composer 2 Fast |
-| `composer-2` | Cursor: Composer 2 |
+| `composer-2.5` | Cursor: Composer 2.5 |
+| `composer-2.5-fast` | Cursor: Composer 2.5 Fast |
+| `grok-build-0.1` | xAI: Grok Build 0.1 |
 | `grok-4.3` | xAI: Grok 4.3 1M |
 | `kimi-k2.5` | Moonshot: Kimi K2.5 |
+
+> 模型名以 `GET /v1/models` 实时返回为准（Cursor 会不定期改名/上下线）。网关已内置兜底：**请求的模型若不在当前可用列表，会自动回退到 `auto`**，因此即便此表过期或上游配了旧名字也不会整体失败。
 
 `base_url` 按部署位置选择：
 
@@ -121,7 +124,7 @@ curl -N -s http://127.0.0.1:8080/v1/chat/completions \
 curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-local-no-auth" \
-  -d '{"model":"composer-2-fast","messages":[{"role":"user","content":"hi"}]}' \
+  -d '{"model":"composer-2.5-fast","messages":[{"role":"user","content":"hi"}]}' \
   | python3 -m json.tool
 ```
 
